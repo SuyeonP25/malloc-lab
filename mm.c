@@ -16,7 +16,9 @@ team_t team = {
 #define WSIZE 4
 #define DSIZE 8
 #define CHUNKSIZE (1 << 12)
-#define UINT_MAX 0xffffffff
+
+#define UINT_MAX 0xffffffff      /* uint 최댓값 (best-fit에 사용) */
+#define MIN_BLK_SIZE (2 * DSIZE) /* 블록 사이즈 최솟값 */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -42,8 +44,7 @@ static void *first_fit(size_t asize);
 static void *next_fit(size_t asize);
 static void *best_fit(size_t asize);
 
-/*
- * 메모리 초기화 함수
+/* 메모리 초기화 함수
  * 성공 시 0 반환  : first_blk는 첫 번째 블록의 포인터
  * 실패 시 -1 반환 : mem_sbrk 실패 시 first_bp = (void*) -1
  */
@@ -68,8 +69,7 @@ int mm_init(void)
     return 0;
 }
 
-/*
- * 메모리 할당 함수
+/* 메모리 할당 함수
  * 성공 시 할당된 블록의 포인터 반환
  * 실패 시 NULL 반환 : size = 0 또는 extend_heap 실패
  */
@@ -85,7 +85,7 @@ void *mm_malloc(size_t size)
     size_t asize;
 
     if (size <= DSIZE)
-        asize = 2 * DSIZE;
+        asize = MIN_BLK_SIZE;
     else
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
 
@@ -114,8 +114,7 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
-/*
- * 메모리 반환 함수
+/* 메모리 반환 함수
  * 인자 포인터에 해당하는 블록을 미할당으로 표시
  */
 void mm_free(void *ptr)
@@ -135,8 +134,7 @@ void mm_free(void *ptr)
     coalesce(ptr);
 }
 
-/*
- * 블록 연결 함수
+/* 블록 연결 함수
  * 직전, 직후 블록과 연결 후 결과 블록의 포인터 반환
  */
 static void *coalesce(void *bp)
@@ -180,8 +178,7 @@ static void *coalesce(void *bp)
     return bp;
 }
 
-/*
- * 재할당 함수
+/* 재할당 함수
  * 성공 시 재할당 된 블록 포인터 반환
  * 실패 시 NULL 반환 (mm_malloc 실패)
  */
@@ -196,6 +193,54 @@ void *mm_realloc(void *ptr, size_t size)
     if (ptr == NULL)
         return mm_malloc(size);
 
+    void *next_bp, *bp;
+    size_t bsize, asize; /* bsize : 기존 블록 크기 asize : 요구 사이즈  */
+    bsize = GET_SIZE(HDRP(ptr));
+
+    if (size <= DSIZE)
+        asize = MIN_BLK_SIZE;
+    else
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+
+    /* Case 1 : 재할당 크기가 원래 크기보다 작음 - 기존 블록 사이즈 수정 */
+    if (asize <= bsize)
+    {
+        size_t dsize;
+        dsize = bsize - asize;
+
+        /* Case 1 - 1 : 크기 차가 블록 최소 사이즈보다 크거나 같음 */
+        if (dsize >= MIN_BLK_SIZE)
+        {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            next_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(next_bp), PACK(dsize, 0));
+            PUT(FTRP(next_bp), PACK(dsize, 0));
+            coalesce(next_bp);
+        }
+
+        return ptr;
+    }
+
+    /* Case 2 : 재할당 크기가 원래 크기보다 큼 */
+    next_bp = NEXT_BLKP(ptr);
+
+    if (!GET_ALLOC(HDRP(next_bp)))
+    {
+        size_t ssize;
+        ssize = bsize + GET_SIZE(HDRP(next_bp));
+
+        /* Case 2 - 1 : 다음 블록이 미할당이고 크기 합이 요구 사이즈보다 크거나 같음 - 기존 블록 사이즈 수정 */
+        if (ssize >= asize)
+        {
+            PUT(HDRP(ptr), PACK(ssize, 1));
+            PUT(FTRP(ptr), PACK(ssize, 1));
+            return ptr;
+        }
+    }
+
+    /* Case 2 - 2 : 기존 블록에서 재할당 불가 - 새 블록 할당 및 메모리 복사 */
     void *newptr;
     newptr = mm_malloc(size);
 
@@ -203,20 +248,13 @@ void *mm_realloc(void *ptr, size_t size)
     if (newptr == NULL)
         return NULL;
 
-    size_t oldsize;
-    oldsize = GET_SIZE(HDRP(ptr));
-
-    if (size < oldsize)
-        oldsize = size;
-    memcpy(newptr, ptr, oldsize);
-
+    memcpy(newptr, ptr, size);
     mm_free(ptr);
 
     return newptr;
 }
 
-/*
- * 힙 확장 함수
+/* 힙 확장 함수
  * 성공 시 확장된 메모리를 포함하는 블록 포인터 반환
  * 실패 시 NULL 반환 (mem_sbrk 실패)
  */
@@ -240,8 +278,7 @@ static void *extend_heap(size_t words)
     return bp;
 }
 
-/*
- * 블록 배치 함수
+/* 블록 배치 함수
  * 미할당 블록 포인터 위치에 할당된 블록 배치
  * 남은 블록의 사이즈가 블록 최소 사이즈(2 * DSIZE) 보다 큰 경우 분할
  */
@@ -252,7 +289,7 @@ static void place(void *bp, size_t asize)
     dsize = bsize - asize;
 
     /* 분할 필요 */
-    if (dsize >= (2 * DSIZE))
+    if (dsize >= MIN_BLK_SIZE)
     {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
@@ -271,13 +308,11 @@ static void place(void *bp, size_t asize)
     }
 }
 
-/*
- * 가용 블록 검색 함수
+/* 가용 블록 검색 함수
  * 사이즈를 만족하는 가용블록이 있을 시 해당 블록의 포인터 반환, 없을 시 NULL 반환
  */
 
-/*
- * 가용 블록 검색 함수 : first-fit
+/* 가용 블록 검색 함수 : first-fit
  */
 static void *first_fit(size_t asize)
 {
@@ -293,8 +328,7 @@ static void *first_fit(size_t asize)
     return NULL;
 }
 
-/*
- * 가용 블록 검색 함수 : next-fit
+/* 가용 블록 검색 함수 : next-fit
  */
 static void *next_fit(size_t asize)
 {
@@ -314,8 +348,7 @@ static void *next_fit(size_t asize)
     return NULL;
 }
 
-/*
- * 가용 블록 검색 함수 : bext-fit
+/* 가용 블록 검색 함수 : bext-fit
  */
 static void *best_fit(size_t asize)
 {
